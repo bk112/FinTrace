@@ -25,6 +25,7 @@ train = [
 # than TRL's built-in vLLM integration, which currently warns for vLLM 0.26.
 rollout = ["vllm>=0.26,<0.27"]
 kb-build = ["akshare>=1.13"]
+synthesis = ["python-dotenv>=1.0", "requests>=2.31", "tqdm>=4.66"]
 dev = ["pytest>=8.0", "ruff>=0.7"]
 
 [tool.pytest.ini_options]
