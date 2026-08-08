@@ -14,18 +14,20 @@ venv/
 !/.env.example
 
 # Data is managed outside version control. Keep only documentation here.
-data/raw/*
-!data/raw/.gitignore
-data/interim/*
-!data/interim/.gitignore
-data/processed/*
-!data/processed/.gitignore
-data/evaluation/*
-!data/evaluation/.gitignore
+# data/raw/*
+# !data/raw/.gitignore
+# data/interim/*
+# !data/interim/.gitignore
+# data/processed/*
+# !data/processed/.gitignore
+# data/evaluation/*
+# !data/evaluation/.gitignore
 
 # Rebuildable KB artifacts and third-party source datasets stay outside Git.
-data/kb/
-data/FinanceComplexQA/
+# FAISS index files are rebuildable from the tracked jsonl data and exceed
+# GitHub's 100 MB per-file limit, so keep them out of version control.
+data/kb/*.index
+# data/FinanceComplexQA/
 
 # Reproducible run outputs, models, and experiment logs
 artifacts/checkpoints/*

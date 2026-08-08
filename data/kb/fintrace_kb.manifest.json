@@ -1,0 +1,8 @@
+{
+  "schema_version": "fintrace-kb-v1.1",
+  "embedding_model": "Qwen/Qwen3-Embedding-0.6B",
+  "embedding_dimension": 1024,
+  "normalize_embeddings": true,
+  "record_count": 57903,
+  "records_sha256": "028d7c287a6e542bb7228bf3983c8a78af929842d477fd631501caa3721e72e2"
+}
