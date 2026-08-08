@@ -1,0 +1,15 @@
+service:
+  host: 127.0.0.1
+  port: 8765
+  endpoint: http://127.0.0.1:8765/retrieve
+
+retrieval:
+  cache_dir: data/interim/retrieval_cache
+  search_limit: 6
+  document_limit: 3
+  preferred_domains:
+    - cninfo.com.cn
+    - sse.com.cn
+    - szse.cn
+    - hkexnews.hk
+    - sec.gov

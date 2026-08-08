@@ -19,7 +19,9 @@ train = [
     "transformers>=4.45",
     "trl>=0.12",
 ]
-rollout = ["vllm>=0.6"]
+# Local reproduction baseline. The project uses a custom rollout adapter rather
+# than TRL's built-in vLLM integration, which currently warns for vLLM 0.26.
+rollout = ["vllm>=0.26,<0.27"]
 dev = ["pytest>=8.0", "ruff>=0.7"]
 
 [tool.pytest.ini_options]
