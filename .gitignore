@@ -23,6 +23,10 @@ data/processed/*
 data/evaluation/*
 !data/evaluation/.gitignore
 
+# Rebuildable KB artifacts and third-party source datasets stay outside Git.
+data/kb/
+data/FinanceComplexQA/
+
 # Reproducible run outputs, models, and experiment logs
 artifacts/checkpoints/*
 !artifacts/checkpoints/.gitignore

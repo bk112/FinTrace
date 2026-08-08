@@ -56,3 +56,20 @@ class KnowledgeRecordTest(unittest.TestCase):
     def test_rejects_percentage_without_normalized_number(self) -> None:
         with self.assertRaises(KnowledgeRecordError):
             parse_knowledge_record(record(value_number=None))
+
+    def test_accepts_current_kb_v1_1_fields(self) -> None:
+        current_record = record(
+            source_url="",
+            entity_type=None,
+            period=None,
+            date="2025-Q4",
+            value_type="ratio",
+        )
+        current_record.pop("entity_type")
+        current_record.pop("period")
+
+        parsed = parse_knowledge_record(current_record)
+
+        self.assertEqual(parsed.entity_type, "company")
+        self.assertEqual(parsed.period, "2025-Q4")
+        self.assertEqual(parsed.value_type, "ratio")

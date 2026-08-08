@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "Financial multi-hop retrieval agent training"
 readme = "README.md"
 requires-python = ">=3.10,<3.13"
-dependencies = []
+dependencies = ["PyYAML>=6.0"]
 
 [project.optional-dependencies]
 train = [
@@ -18,10 +18,13 @@ train = [
     "torch>=2.4",
     "transformers>=4.45",
     "trl>=0.12",
+    "faiss-cpu>=1.8",
+    "sentence-transformers>=3.0",
 ]
 # Local reproduction baseline. The project uses a custom rollout adapter rather
 # than TRL's built-in vLLM integration, which currently warns for vLLM 0.26.
 rollout = ["vllm>=0.26,<0.27"]
+kb-build = ["akshare>=1.13"]
 dev = ["pytest>=8.0", "ruff>=0.7"]
 
 [tool.pytest.ini_options]

@@ -28,7 +28,10 @@ rollout:
     - "<|im_end|>"
 
 retrieval:
-  adapter: tool_aware
+  # kb          — 本地 FAISS 知识库（进程内，推荐训练用）
+  # tool_aware  — HTTP 检索服务（需 FINTRACE_TOOL_AWARE_ENDPOINT / --endpoint）
+  adapter: kb
+  top_k: 3
   endpoint_env_var: FINTRACE_TOOL_AWARE_ENDPOINT
   timeout_seconds: 30
 

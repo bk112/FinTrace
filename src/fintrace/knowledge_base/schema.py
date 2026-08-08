@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
-from typing import Any, Literal, Mapping
+from typing import Any, Literal
 
 
 class KnowledgeRecordError(ValueError):
     """Raised when a source fact cannot safely enter the canonical knowledge base."""
 
 
-ValueType = Literal["amount", "percentage", "rank", "entity", "text"]
+ValueType = Literal["amount", "percentage", "ratio", "rank", "entity", "text"]
 
 
 @dataclass(frozen=True)
@@ -50,30 +51,28 @@ _REQUIRED_TEXT_FIELDS = (
     "fact_id",
     "fact",
     "source_doc",
-    "source_url",
     "source_type",
     "document_id",
     "published_at",
     "retrieved_at",
     "raw_content_hash",
     "entity",
-    "entity_type",
     "metric",
     "value_text",
     "value_type",
-    "period",
 )
-_VALUE_TYPES = {"amount", "percentage", "rank", "entity", "text"}
+_VALUE_TYPES = {"amount", "percentage", "ratio", "rank", "entity", "text"}
 
 
 def parse_knowledge_record(record: Mapping[str, Any]) -> KnowledgeRecord:
-    """Validate the v1.1 canonical financial-fact schema."""
+    """Validate both legacy records and the current v1.1 KB record shape."""
     for name in _REQUIRED_TEXT_FIELDS:
         value = record.get(name)
         if not isinstance(value, str) or not value.strip():
             raise KnowledgeRecordError(f"{name} must be a non-empty string")
-    if not record["source_url"].startswith(("https://", "http://")):
-        raise KnowledgeRecordError("source_url must be an HTTP(S) URL")
+    source_url = record.get("source_url", "")
+    if source_url and not source_url.startswith(("https://", "http://")):
+        raise KnowledgeRecordError("source_url must be empty or an HTTP(S) URL")
     if record["value_type"] not in _VALUE_TYPES:
         raise KnowledgeRecordError("value_type is not supported")
 
@@ -104,18 +103,18 @@ def parse_knowledge_record(record: Mapping[str, Any]) -> KnowledgeRecord:
         fact_id=record["fact_id"].strip(),
         fact=record["fact"].strip(),
         source_doc=record["source_doc"].strip(),
-        source_url=record["source_url"].strip(),
+        source_url=str(source_url).strip(),
         source_type=record["source_type"].strip(),
         document_id=record["document_id"].strip(),
         published_at=record["published_at"].strip(),
         retrieved_at=record["retrieved_at"].strip(),
         raw_content_hash=record["raw_content_hash"].strip(),
         entity=record["entity"].strip(),
-        entity_type=record["entity_type"].strip(),
+        entity_type=str(record.get("entity_type", "company")).strip() or "company",
         metric=record["metric"].strip(),
         value_text=record["value_text"].strip(),
         value_type=record["value_type"],
-        period=record["period"].strip(),
+        period=str(record.get("period", record.get("date", ""))).strip(),
         value_number=float(value_number) if value_number is not None else None,
         related_entities=tuple(entity.strip() for entity in related_entities),
         structured=structured,

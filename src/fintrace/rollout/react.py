@@ -6,9 +6,7 @@ from fintrace.rewards import SearchStep, Trajectory
 from fintrace.rewards.constants import (
     MAX_ROUNDS,
     TAG_ANSWER_CLOSE,
-    TAG_ANSWER_OPEN,
     TAG_SEARCH_CLOSE,
-    TAG_SEARCH_OPEN,
 )
 from fintrace.tools.base import RetrievalClient
 

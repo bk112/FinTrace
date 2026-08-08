@@ -16,6 +16,24 @@ from fintrace.training import PromptMetadata, VllmReActGRPORollout, financial_tr
 from fintrace.tools import ToolAwareHttpClient
 
 
+def build_retrieval_client(config: dict, endpoint: str | None):
+    """Construct the retrieval client selected by config["retrieval"]["adapter"]."""
+    retrieval_config = config["retrieval"]
+    adapter = retrieval_config.get("adapter", "tool_aware")
+    if adapter == "kb":
+        from fintrace.kb import KbRetrievalClient
+        return KbRetrievalClient(top_k=retrieval_config.get("top_k", 3))
+    if adapter == "tool_aware":
+        if not endpoint:
+            print("Set FINTRACE_TOOL_AWARE_ENDPOINT or pass --endpoint", file=sys.stderr)
+            raise SystemExit(2)
+        return ToolAwareHttpClient(
+            endpoint=endpoint,
+            timeout_seconds=retrieval_config["timeout_seconds"],
+        )
+    raise ValueError(f"unknown retrieval adapter: {adapter!r} (expected 'kb' or 'tool_aware')")
+
+
 def load_config(path: Path) -> dict:
     with path.open("r", encoding="utf-8") as handle:
         value = yaml.safe_load(handle)
@@ -61,9 +79,6 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
-    if not args.endpoint:
-        print("Set FINTRACE_TOOL_AWARE_ENDPOINT or pass --endpoint", file=sys.stderr)
-        return 2
 
     config = load_config(args.config)
     model_config = config["model"]
@@ -71,10 +86,13 @@ def main() -> int:
     training_config = config["training"]
     records, metadata_by_prompt = build_records(Path(config["data"]["train_path"]))
 
+    retrieval_client = build_retrieval_client(config, args.endpoint)
+
     summary = {
         "mode": "train" if args.run else "dry-run",
         "records": len(records),
         "model": model_config["base_model_path"],
+        "retrieval_adapter": config["retrieval"].get("adapter", "tool_aware"),
         "endpoint": args.endpoint,
         "num_generations": rollout_config["num_generations"],
         "max_steps": args.max_steps,
@@ -105,10 +123,6 @@ def main() -> int:
         lora_alpha=model_config["lora_alpha"],
         lora_dropout=model_config["lora_dropout"],
         target_modules="all-linear",
-    )
-    retrieval_client = ToolAwareHttpClient(
-        endpoint=args.endpoint,
-        timeout_seconds=config["retrieval"]["timeout_seconds"],
     )
     rollout = VllmReActGRPORollout(
         model_path=model_config["base_model_path"],
