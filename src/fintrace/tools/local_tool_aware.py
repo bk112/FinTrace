@@ -56,6 +56,7 @@ class LocalToolAwareRetriever:
             raise ValueError("query must be non-empty")
         cache_path = self._cache_path(normalized_query)
         if cache_path.is_file():
+            # 强化训练阶段优先重放同一份证据，避免在线网页变化让同一轨迹奖励漂移。
             return self._read_cache(cache_path, normalized_query)
 
         documents, strategy = self._retrieve(normalized_query)
@@ -76,9 +77,11 @@ class LocalToolAwareRetriever:
     def _retrieve(self, query: str) -> tuple[list[EvidenceDocument], str]:
         parsed = urlparse(query)
         if parsed.scheme in {"http", "https"} and parsed.netloc:
+            # 模型已经给出明确页面时跳过搜索，直接调用 page_read 工具。
             document = self._page_reader.read(SearchHit(title=query, url=query))
             return [document], "page_read"
 
+        # 普通自然语言查询采用 web_search -> page_read 的两步工具链。
         hits = self._search_provider.search(query, self._config.search_limit)
         ranked_hits = sorted(hits, key=self._domain_priority, reverse=True)
         documents: list[EvidenceDocument] = []
@@ -94,6 +97,7 @@ class LocalToolAwareRetriever:
     def _domain_priority(self, hit: SearchHit) -> tuple[int, int]:
         hostname = (urlparse(hit.url).hostname or "").lower()
         is_preferred = any(hostname == domain or hostname.endswith(f".{domain}") for domain in self._config.preferred_domains)
+        # 财报与公告优先使用交易所/监管披露页，网页长度仅作为稳定的次级排序。
         return (1 if is_preferred else 0, -len(hit.url))
 
     @staticmethod

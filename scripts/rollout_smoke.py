@@ -59,6 +59,7 @@ def main() -> int:
         stop_sequences=tuple(rollout_config["stop_sequences"]),
     )
     result = rollout.run(args.prompt, args.ground_truth)
+    # 此处只做推理链路验证，reward 用于观察，不会执行反向传播或更新 LoRA 权重。
     breakdown = compute_total_reward(result.trajectory)
 
     print(

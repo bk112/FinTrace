@@ -26,6 +26,7 @@ def make_handler(retriever: LocalToolAwareRetriever):
                 self._write_json(HTTPStatus.NOT_FOUND, {"error": "not found"})
                 return
             try:
+                # 对外仅暴露稳定的 query/text 契约，内部搜索实现可替换而不影响 rollout。
                 length = int(self.headers.get("Content-Length", "0"))
                 payload = json.loads(self.rfile.read(length))
                 query = payload["query"]
@@ -42,6 +43,7 @@ def make_handler(retriever: LocalToolAwareRetriever):
             self._write_json(
                 HTTPStatus.OK,
                 {
+                    # text 是训练时拼入 observation 的唯一字段；sources 用于数据追溯与错误分析。
                     "text": result.text,
                     "sources": result.metadata.get("sources", []),
                     "strategy": result.metadata.get("strategy"),

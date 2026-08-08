@@ -78,3 +78,19 @@ PYTHONPATH=src python scripts/serve_tool_aware.py
 Then use `http://127.0.0.1:8765/retrieve` as the rollout endpoint. For
 training and evaluation, preserve the generated retrieval cache with the run
 report so a later replay uses the same evidence.
+
+## First GRPO Step
+
+The first training entry validates data and configuration by default. Add
+`--run` only after the local retrieval service is healthy. This first version
+intentionally permits one optimizer step, because vLLM LoRA synchronization
+between steps is the next implementation item.
+
+```bash
+PYTHONPATH=src python scripts/train_grpo.py \
+  --endpoint http://127.0.0.1:8765/retrieve
+
+PYTHONPATH=src python scripts/train_grpo.py \
+  --endpoint http://127.0.0.1:8765/retrieve \
+  --run
+```

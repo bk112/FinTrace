@@ -24,6 +24,7 @@ class ReActAction:
 
 
 _TURN_PATTERN = re.compile(
+    # 单轮输出只允许一个 think 和一个动作；[^<]* 禁止模型把第二个标签吞进内容里。
     r"^\s*<think>(?P<thought>[^<]*)</think>\s*"
     r"(?:(?:<search>(?P<query>[^<]*)</search>)|(?:<answer>(?P<answer>[^<]*)</answer>))\s*$",
     re.DOTALL,

@@ -34,6 +34,7 @@ def tokenize_trace_with_env_mask(
     independently tokenizing each segment. A token crossing an ownership
     boundary is rejected rather than silently assigned an incorrect loss mask.
     """
+    # 必须整段 tokenize；逐段 tokenize 会在 BPE 边界产生不同 token，导致 mask 与文本错位。
     text = "".join(segment.text for segment in segments)
     encoded = tokenizer(text, add_special_tokens=False, return_offsets_mapping=True)
     input_ids = list(encoded["input_ids"])
@@ -54,6 +55,7 @@ def tokenize_trace_with_env_mask(
             raise ValueError("zero-width token offset cannot be assigned an ownership mask")
         owners = {owner for span_start, span_end, owner in spans if start >= span_start and end <= span_end}
         if len(owners) != 1:
+            # 宁可拒绝边界不清的样本，也不能给环境 token 错打为可训练 token。
             raise ValueError("token offset crosses a trace ownership boundary")
         env_mask.append(owners.pop())
 

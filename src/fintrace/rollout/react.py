@@ -49,6 +49,7 @@ class ReActRollout:
 
         for round_number in range(1, self._max_rounds + 1):
             try:
+                # 在动作闭合标签处截断，才能先执行工具、再把 observation 拼回上下文继续生成。
                 generated = self._engine.generate(context, self._stop_sequences)
             except Exception:
                 return self._result(
@@ -76,6 +77,7 @@ class ReActRollout:
 
             assistant_text += generated
             context += generated
+            # assistant 生成内容参与 GRPO loss；环境返回内容会在下方以 environment 标记。
             segments.append(TraceSegment(owner="assistant", text=generated))
 
             try:
@@ -108,6 +110,7 @@ class ReActRollout:
 
             normalized_query = query.casefold().strip()
             if not normalized_query or normalized_query in seen_queries:
+                # 重复查询既浪费外部调用，也会形成可被 reward 利用的无意义轨迹，直接终止。
                 return self._result(
                     assistant_text,
                     ground_truth,
@@ -136,8 +139,16 @@ class ReActRollout:
 
             observation = f"<observation>{retrieval_result.text}</observation>"
             context += observation
+            # observation 是环境反馈，不应驱动模型学习复述检索网页内容。
             segments.append(TraceSegment(owner="environment", text=observation))
-            search_steps.append(SearchStep(query=query, retrieved_text=retrieval_result.text))
+            records = retrieval_result.metadata.get("records", [])
+            search_steps.append(
+                SearchStep(
+                    query=query,
+                    retrieved_text=retrieval_result.text,
+                    retrieved_records=records if isinstance(records, list) else [],
+                )
+            )
             retrieval_results.append(retrieval_result)
 
         return self._result(

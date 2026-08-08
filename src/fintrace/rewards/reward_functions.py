@@ -44,6 +44,8 @@ class SearchStep:
     """一次搜索动作的记录：query内容 + 工具返回的检索结果文本"""
     query: str
     retrieved_text: str
+    # 可选的结构化命中，用于金融数值/单位的精确判断；保留文本字段兼容现有测试和网页检索。
+    retrieved_records: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -323,6 +325,22 @@ def reward_retrieval_correctness(trajectory: Trajectory) -> float:
     即得满分。
     """
     for step in trajectory.search_steps:
+        # 知识库命中优先按规范化字段判定，避免把“15.3亿元”误当作“15.3%”。
+        for record in step.retrieved_records:
+            value_text = str(record.get("value_text", ""))
+            fact_text = str(record.get("fact", ""))
+            unit = str(record.get("unit", ""))
+            unit_compatible = not (
+                "%" in trajectory.ground_truth and "%" not in f"{value_text}{unit}"
+            )
+            if unit_compatible and (
+                _numeric_match(value_text, trajectory.ground_truth)
+                or _numeric_match(fact_text, trajectory.ground_truth)
+            ):
+                return WEIGHT_RETRIEVAL_CORRECTNESS
+            gt_tokens = _tokenize(trajectory.ground_truth)
+            if gt_tokens and all(token in value_text or token in fact_text for token in gt_tokens):
+                return WEIGHT_RETRIEVAL_CORRECTNESS
         retrieved = step.retrieved_text
         # 关键词覆盖检查
         gt_tokens = _tokenize(trajectory.ground_truth)

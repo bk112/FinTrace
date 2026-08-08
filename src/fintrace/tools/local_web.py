@@ -143,6 +143,7 @@ def _is_public_http_url(url: str) -> bool:
     except OSError:
         return False
     for address in addresses:
+        # 检索结果最终会被 agent 间接触发请求，必须阻断内网/本机地址以避免 SSRF。
         ip = ipaddress.ip_address(address)
         if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
             return False

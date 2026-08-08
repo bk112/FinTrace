@@ -55,6 +55,7 @@ class VllmGenerationEngine:
             temperature=self._temperature,
             top_p=self._top_p,
             stop=list(stop_sequences),
+            # vLLM 默认会移除 stop 字符串；这里必须保留闭合标签供 ReAct parser 校验。
             include_stop_str_in_output=True,
         )
         outputs = self._llm.generate([prompt], sampling_params=sampling_params, use_tqdm=False)
