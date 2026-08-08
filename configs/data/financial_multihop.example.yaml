@@ -1,0 +1,13 @@
+dataset:
+  train_path: data/processed/train.jsonl
+  validation_path: data/processed/validation.jsonl
+  evaluation_path: data/evaluation/financial_multihop_test.jsonl
+  required_fields:
+    - qid
+    - prompt
+    - ground_truth
+    - source
+  ground_truth_field: target
+  require_nonempty_target_list: true
+  apply_zero_of_eight_filter: true
+  zero_of_eight_model_path: /media/xdhpc/data/whr/models/Qwen2.5-3B-Instruct

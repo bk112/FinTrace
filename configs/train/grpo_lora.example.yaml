@@ -1,0 +1,43 @@
+# Copy this file for a concrete run. Do not commit endpoint URLs or secrets.
+run:
+  name: qwen25_3b_financial_grpo
+  seed: 42
+  output_dir: artifacts
+
+model:
+  base_model_path: /media/xdhpc/data/whr/models/Qwen2.5-3B-Instruct
+  candidate_upgrade_path: /media/xdhpc/data/whr/models/Qwen2.5-7B-Instruct
+  torch_dtype: bfloat16
+  max_model_length: 8192
+  lora_rank: 64
+  lora_alpha: 128
+  lora_dropout: 0.0
+
+rollout:
+  engine: vllm
+  num_generations: 4
+  max_response_tokens: 4096
+  max_rounds: 25
+  max_tool_calls_per_round: 5
+  stop_sequences:
+    - "</search>"
+    - "</answer>"
+    - "<|im_end|>"
+
+retrieval:
+  adapter: tool_aware
+  endpoint_env_var: FINTRACE_TOOL_AWARE_ENDPOINT
+  timeout_seconds: 30
+
+training:
+  algorithm: grpo
+  learning_rate: 1.0e-6
+  kl_coefficient: 0.001
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 4
+  max_steps: 100
+
+data:
+  train_path: data/processed/train.jsonl
+  validation_path: data/processed/validation.jsonl
+  evaluation_path: data/evaluation/financial_multihop_test.jsonl

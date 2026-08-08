@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# Local configuration and secrets
+.env
+.env.*
+!/.env.example
+
+# Data is managed outside version control. Keep only documentation here.
+data/raw/*
+!data/raw/.gitignore
+data/interim/*
+!data/interim/.gitignore
+data/processed/*
+!data/processed/.gitignore
+data/evaluation/*
+!data/evaluation/.gitignore
+
+# Reproducible run outputs, models, and experiment logs
+artifacts/checkpoints/*
+!artifacts/checkpoints/.gitignore
+artifacts/rollouts/*
+!artifacts/rollouts/.gitignore
+artifacts/reports/*
+!artifacts/reports/.gitignore
+wandb/
+
+# OS and editor files
+.DS_Store
+.idea/
+.vscode/
+
+# personal file
+/docs
