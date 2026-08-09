@@ -16,12 +16,13 @@ rollout:
   engine: transformers
   # 仅验证端到端反传：最小两条 completion 组成一个 GRPO 组。
   num_generations: 2
-  max_response_tokens: 64
+  # 总 completion 包含检索 observation；top_k=3 的结构化证据约占千余 token。
+  max_response_tokens: 2048
   max_tokens_per_turn: 64
   temperature: 1.0
   top_p: 1.0
-  max_rounds: 1
-  max_tool_calls_per_round: 1
+  max_rounds: 2
+  max_tool_calls_per_round: 2
   stop_sequences:
     - "</search>"
     - "</answer>"
