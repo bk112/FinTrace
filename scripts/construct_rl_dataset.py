@@ -2,12 +2,13 @@
 """Construct a FinTrace RL candidate set using the documented five-step workflow.
 
 Requires CODEBUDDY_API_KEY in .env. It makes streamed DeepSeek V4 Flash calls
-sequentially because the provider's safe concurrency limit is unknown.
+with a small, caller-controlled concurrency level.
 """
 
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 import json
 import os
 import random
@@ -24,6 +25,7 @@ from tqdm import tqdm
 
 from fintrace.data.agentic_synthesis import (
     answer_targets,
+    build_anchored_lookup_question,
     build_entity_groups,
     eligible_record,
     output_record,
@@ -41,8 +43,8 @@ DEFAULT_REJECTED = PROJECT_ROOT / "data" / "interim" / "rl_synthesis_rejected.js
 API_URL = "https://copilot.tencent.com/v2/chat/completions"
 API_MODEL = "deepseek-v4-flash-ioa"
 
-SELECT_PROMPT = """给定根实体“{entity}”及候选事实，选出最适合与当前事实组成两到三跳金融检索问题的一条。
-优先不同报告期的同一指标、或同行业不同公司的同一指标。只返回候选序号，不要其他文字。
+SELECT_PROMPT = """给定根实体“{entity}”及候选事实，选择一条与当前事实属于同一公司、同一指标、不同报告期且数值不同的候选。
+该选择会被代码模板化为检索问题，因此不能引入另一家公司、比较关系或任何额外事实。只返回候选序号，不要其他文字。
 当前事实：{current_fact}
 候选：
 {candidates}"""
@@ -53,7 +55,9 @@ BRAINSTORM_PROMPT = """已有实体：{entities}。从候选中选择一条能�
 {candidates}"""
 
 COMPOSE_PROMPT = """根据以下已验证金融事实，写一个中文金融检索问题。
-问题必须需要结合全部事实才能确定最后一条事实的数值，且不得直接泄露公司名、日期、具体数值或答案。
+答案必须严格等于最后一条事实的原始数值；前面的事实只能用于定位该最后事实，不能参与数值计算。
+禁止询问差值、增减幅度、百分点、比例、倍数、最大值、最小值或任何需要计算两个事实的结果。
+问题必须需要结合全部事实才能定位最后一条事实，且不得直接泄露公司名、日期、具体数值或答案。
 只输出问题本身，不要解释、答案、标签或编号。
 事实：
 {facts}"""
@@ -66,6 +70,25 @@ UNIQUE_PROMPT = """判断模糊化问题是否仍能唯一确定原问题的答�
 只回答“是”或“否”。
 原问题：{original}
 模糊化问题：{fuzzed}"""
+
+TARGET_ALIGNMENT_PROMPT = """根据事实和问题判断 target 是否严格正确。
+只有在问题要求直接查出“目标事实”的原始数值，且其他事实仅用于定位该事实时回答“是”。
+若问题要求比较、相减、相除、求百分点、比例、倍数、最大最小值，或询问实体/时期而 target 是数值，则回答“否”。
+只回答“是”或“否”。
+目标事实：{target_fact}
+全部事实：
+{facts}
+问题：{question}"""
+
+RELATION_GROUNDING_PROMPT = """核验问题中的每一个事实关系是否都能由给定结构化事实严格支持。
+禁止把同一实体说成“另一家/另一公司”，禁止把不同数值说成“相同/一致/相等”，禁止虚构报告期、指标、比较关系或因果关系。
+问题只能将事实改写为描述性定位线索；若任一限定条件与事实冲突、事实不足以支持，或无法确认，回答“否”。
+只有全部关系均真实且 target 仍直接询问最后一条事实的原始数值时，才回答“是”。
+只回答“是”或“否”。
+目标事实：{target_fact}
+全部事实：
+{facts}
+问题：{question}"""
 
 
 class RemoteLLMError(RuntimeError):
@@ -131,7 +154,7 @@ class DeepSeekFlashClient:
 
 
 class BlindBaseModel:
-    """Local no-tool base model used only for the documented 0/3 difficulty gate."""
+    """Local no-tool base model used only for the documented difficulty gate."""
 
     def __init__(self, model_path: str, max_model_len: int, backend: str) -> None:
         self._backend = backend
@@ -248,6 +271,7 @@ def _select_record(
     llm: DeepSeekFlashClient,
     exclude_ids: set[str],
     known_entities: list[str] | None = None,
+    require_same_entity_metric: bool = False,
 ) -> dict[str, Any] | None:
     from fintrace.kb import search_records
 
@@ -256,6 +280,15 @@ def _select_record(
         for record in search_records(query, top_k=5)
         if record.get("fact_id") not in exclude_ids and eligible_record(record)
     ]
+    if require_same_entity_metric:
+        candidates = [
+            record
+            for record in candidates
+            if record["entity"] == current["entity"]
+            and record["metric"] == current["metric"]
+            and record["date"] != current["date"]
+            and record["value_text"] != current["value_text"]
+        ]
     if not candidates:
         return None
     prompt = prompt_template.format(
@@ -284,8 +317,41 @@ def _fuzz_with_uniqueness_check(
     return None, detail
 
 
+def _target_alignment_passes(
+    question: str,
+    final_record: dict[str, Any],
+    facts: str,
+    llm: DeepSeekFlashClient,
+) -> bool:
+    verdict = llm.complete(
+        TARGET_ALIGNMENT_PROMPT.format(
+            target_fact=final_record["fact"],
+            facts=facts,
+            question=question,
+        )
+    )
+    return unique_verdict_is_yes(verdict)
+
+
+def _relation_grounding_passes(
+    question: str,
+    final_record: dict[str, Any],
+    facts: str,
+    llm: DeepSeekFlashClient,
+) -> bool:
+    """Reject questions whose descriptive relations contradict their source records."""
+    verdict = llm.complete(
+        RELATION_GROUNDING_PROMPT.format(
+            target_fact=final_record["fact"],
+            facts=facts,
+            question=question,
+        )
+    )
+    return unique_verdict_is_yes(verdict)
+
+
 def _difficulty_passes(question: str, targets: list[str], base_model: BlindBaseModel, trials: int) -> bool:
-    """0/3 gate: accept only if every no-tool base-model guess is wrong by reward F1."""
+    """0/N gate: accept only if every no-tool base-model guess is wrong by reward F1."""
     for guess in base_model.guesses(question, trials):
         if any(compute_f1(guess, target) >= F1_CORRECT_THRESHOLD for target in targets):
             return False
@@ -299,60 +365,55 @@ class AttemptFailure:
 
 
 def _construct_one(root: dict[str, Any], llm: DeepSeekFlashClient, max_loops: int) -> tuple[dict[str, Any] | None, AttemptFailure | None]:
-    """Run SELECT -> optional BRAINSTORM -> FUZZ; EXIT is the fixed loop bound."""
+    """Run a record-constrained SELECT -> TEMPLATE -> EXIT synthesis flow."""
+    if max_loops != 2:
+        return None, AttemptFailure("unsupported_max_loops", "deterministic template requires --max-loops 2")
     involved = [root]
     selected = _select_record(
         current=root,
-        query=f"{root['entity']} 相关 {root['metric']}",
+        query=f"{root['entity']} {root['metric']}",
         prompt_template=SELECT_PROMPT,
         llm=llm,
         exclude_ids={str(root["fact_id"])},
+        require_same_entity_metric=True,
     )
     if selected is None:
         return None, AttemptFailure("select_failed")
     involved.append(selected)
 
-    # 第三跳只在配置允许时尝试；没有合适新实体时保留已验证的两跳链。
-    if max_loops >= 3:
-        brainstorm = _select_record(
-            current=selected,
-            query=f"{selected['entity']} 同行业 对比 {selected['metric']}",
-            prompt_template=BRAINSTORM_PROMPT,
-            llm=llm,
-            exclude_ids={str(record["fact_id"]) for record in involved},
-            known_entities=[str(record["entity"]) for record in involved],
-        )
-        if brainstorm is not None and brainstorm.get("entity") not in {record["entity"] for record in involved}:
-            involved.append(brainstorm)
-
-    facts = "\n".join(
-        f"- [{record['fact_id']}] {record['fact']}" for record in involved
-    )
-    draft = _clean_question(llm.complete(COMPOSE_PROMPT.format(facts=facts)))
-    fuzzed, fuzz_failure_detail = _fuzz_with_uniqueness_check(draft, llm)
-    if fuzzed is None:
-        return None, AttemptFailure("fuzz_not_unique", fuzz_failure_detail)
-    if _contains_answer_leak(fuzzed, answer_targets(involved[-1])):
-        return None, AttemptFailure("answer_leak")
-    return output_record(
+    try:
+        question = build_anchored_lookup_question(root, selected)
+    except ValueError as error:
+        return None, AttemptFailure("template_constraint_failed", str(error))
+    output = output_record(
         qid="",
-        prompt=fuzzed,
+        prompt=question,
         root=root,
         involved=involved,
-        actions=(
-            ["SELECT", "BRAINSTORM", "FUZZ", "EXIT"]
-            if len(involved) == 3
-            else ["SELECT", "FUZZ", "EXIT"]
-        ),
-    ), None
+        actions=["SELECT", "TEMPLATE", "EXIT"],
+    )
+    output["meta"]["question_policy"] = "same_entity_metric_template_v1"
+    return output, None
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--records", type=Path, default=DEFAULT_RECORDS)
-    parser.add_argument("--candidates", type=int, default=100, help="number of candidate attempts before 0/3 filtering")
-    parser.add_argument("--max-loops", type=int, default=3, choices=(2, 3))
-    parser.add_argument("--difficulty-trials", type=int, default=3, choices=(3,))
+    parser.add_argument("--candidates", type=int, default=100, help="number of candidate attempts before difficulty filtering")
+    parser.add_argument(
+        "--max-loops",
+        type=int,
+        default=2,
+        choices=(2,),
+        help="fixed at 2: root fact plus target fact are rendered by a deterministic template",
+    )
+    parser.add_argument("--difficulty-trials", type=int, default=6, choices=(3, 6))
+    parser.add_argument(
+        "--api-concurrency",
+        type=int,
+        default=1,
+        help="simultaneous remote construction requests; use 2 first and increase only after a clean run",
+    )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--base-model", default="/media/xdhpc/data/whr/models/Qwen2.5-3B-Instruct")
     parser.add_argument(
@@ -375,6 +436,9 @@ def main() -> int:
         return 2
     if args.candidates < 1:
         print("--candidates must be positive", file=sys.stderr)
+        return 2
+    if not 1 <= args.api_concurrency <= 4:
+        print("--api-concurrency must be between 1 and 4", file=sys.stderr)
         return 2
     if not args.records.is_file():
         print(f"records file does not exist: {args.records}", file=sys.stderr)
@@ -404,11 +468,11 @@ def main() -> int:
     llm = DeepSeekFlashClient(api_key, args.timeout_seconds)
     base_model: BlindBaseModel | None = None
     accepted = rejected = 0
-    _status(f"远程构造模型: {API_MODEL}；API 严格单并发")
+    _status(f"远程构造模型: {API_MODEL}；API 并发={args.api_concurrency}")
     if not sys.stdout.isatty():
         _status("当前标准输出不是终端；请使用 conda run --no-capture-output 以实时查看进度")
 
-    # 供应商并发上限未知，故严格单并发；tqdm 会实时显示构造和筛选进度。
+    # 远端请求可小并发；本地 GPU 盲猜与 JSONL 写入必须串行，避免显存争用和写入竞争。
     with args.accepted_output.open("w", encoding="utf-8") as accepted_fh, args.rejected_output.open(
         "w", encoding="utf-8"
     ) as rejected_fh, tqdm(
@@ -419,63 +483,81 @@ def main() -> int:
         mininterval=0.3,
         dynamic_ncols=True,
     ) as progress:
-        for attempt in range(args.candidates):
+        next_attempt = 0
+        pending: dict[Future[tuple[dict[str, Any] | None, AttemptFailure | None]], tuple[int, dict[str, Any]]] = {}
+
+        def submit_attempt(executor: ThreadPoolExecutor, attempt: int) -> None:
             entity = entities[attempt % len(entities)]
             root = rng.choice(groups[entity])
-            try:
-                candidate, failure = _construct_one(root, llm, args.max_loops)
-            except RemoteLLMError as exc:
-                _append_jsonl(
-                    rejected_fh,
-                    _failure_payload(attempt, root, "remote_llm_error", str(exc)),
-                )
-                rejected += 1
-                progress.update(1)
-                continue
-            except Exception as exc:
-                _append_jsonl(
-                    rejected_fh,
-                    _failure_payload(attempt, root, "construction_error", str(exc)),
-                )
-                rejected += 1
-                progress.update(1)
-                continue
+            future = executor.submit(_construct_one, root, llm, args.max_loops)
+            pending[future] = (attempt, root)
 
-            if failure is not None:
-                _append_jsonl(
-                    rejected_fh,
-                    _failure_payload(attempt, root, failure.reason, failure.detail),
-                )
-                rejected += 1
-            else:
-                assert candidate is not None
-                if base_model is None:
-                    progress.clear()
-                    _status(
-                        f"首条候选通过构造，加载本地难度模型 "
-                        f"({args.difficulty_backend}): {args.base_model}"
-                    )
-                    base_model = BlindBaseModel(
-                        args.base_model, args.max_model_len, args.difficulty_backend
-                    )
-                    _status("本地难度模型加载完成，开始执行 0/3 无工具盲猜筛选")
-                targets = candidate["ground_truth"]["target"]
-                if _difficulty_passes(candidate["prompt"], targets, base_model, args.difficulty_trials):
-                    candidate["qid"] = f"ft_{accepted + 1:05d}"
-                    _append_jsonl(accepted_fh, candidate)
-                    accepted += 1
-                else:
-                    _append_jsonl(
-                        rejected_fh,
-                        _failure_payload(
-                            attempt,
-                            root,
-                            "difficulty_failed_base_model_guessed",
-                        ) | {"meta": candidate["meta"]},
-                    )
-                    rejected += 1
-            progress.update(1)
-            progress.set_postfix(accepted=accepted, rejected=rejected)
+        with ThreadPoolExecutor(max_workers=args.api_concurrency, thread_name_prefix="remote-construct") as executor:
+            while next_attempt < args.candidates and len(pending) < args.api_concurrency:
+                submit_attempt(executor, next_attempt)
+                next_attempt += 1
+
+            while pending:
+                done, _ = wait(pending, return_when=FIRST_COMPLETED)
+                for future in done:
+                    attempt, root = pending.pop(future)
+                    try:
+                        candidate, failure = future.result()
+                    except RemoteLLMError as exc:
+                        _append_jsonl(
+                            rejected_fh,
+                            _failure_payload(attempt, root, "remote_llm_error", str(exc)),
+                        )
+                        rejected += 1
+                    except Exception as exc:
+                        _append_jsonl(
+                            rejected_fh,
+                            _failure_payload(attempt, root, "construction_error", str(exc)),
+                        )
+                        rejected += 1
+                    else:
+                        if failure is not None:
+                            _append_jsonl(
+                                rejected_fh,
+                                _failure_payload(attempt, root, failure.reason, failure.detail),
+                            )
+                            rejected += 1
+                        else:
+                            assert candidate is not None
+                            if base_model is None:
+                                progress.clear()
+                                _status(
+                                    f"首条候选通过构造，加载本地难度模型 "
+                                    f"({args.difficulty_backend}): {args.base_model}"
+                                )
+                                base_model = BlindBaseModel(
+                                    args.base_model, args.max_model_len, args.difficulty_backend
+                                )
+                                _status(
+                                    f"本地难度模型加载完成，开始执行 "
+                                    f"0/{args.difficulty_trials} 无工具盲猜筛选"
+                                )
+                            targets = candidate["ground_truth"]["target"]
+                            if _difficulty_passes(candidate["prompt"], targets, base_model, args.difficulty_trials):
+                                candidate["qid"] = f"ft_{accepted + 1:05d}"
+                                _append_jsonl(accepted_fh, candidate)
+                                accepted += 1
+                            else:
+                                _append_jsonl(
+                                    rejected_fh,
+                                    _failure_payload(
+                                        attempt,
+                                        root,
+                                        "difficulty_failed_base_model_guessed",
+                                    ) | {"meta": candidate["meta"]},
+                                )
+                                rejected += 1
+
+                    progress.update(1)
+                    progress.set_postfix(accepted=accepted, rejected=rejected)
+                    if next_attempt < args.candidates:
+                        submit_attempt(executor, next_attempt)
+                        next_attempt += 1
 
     print(
         json.dumps(
@@ -485,7 +567,7 @@ def main() -> int:
                 "rejected": rejected,
                 "accepted_output": str(args.accepted_output),
                 "rejected_output": str(args.rejected_output),
-                "api_concurrency": 1,
+                "api_concurrency": args.api_concurrency,
                 "difficulty_trials": args.difficulty_trials,
                 "difficulty_backend": args.difficulty_backend,
             },

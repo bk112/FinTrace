@@ -1,6 +1,7 @@
 # Copy this file for a concrete run. Do not commit endpoint URLs or secrets.
 run:
   name: qwen25_3b_financial_grpo
+  project: fintrace
   seed: 42
   output_dir: artifacts
 

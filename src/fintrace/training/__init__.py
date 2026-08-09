@@ -5,11 +5,12 @@ from .react_grpo_rollout import (
     TransformersReActGRPORollout,
     VllmReActGRPORollout,
 )
-from .reward_adapter import financial_trajectory_reward
+from .reward_adapter import TrajectoryAuditReward, financial_trajectory_reward
 
 __all__ = [
     "PromptMetadata",
     "TransformersReActGRPORollout",
     "VllmReActGRPORollout",
+    "TrajectoryAuditReward",
     "financial_trajectory_reward",
 ]

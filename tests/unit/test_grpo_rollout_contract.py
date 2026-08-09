@@ -22,8 +22,9 @@ class CharacterTokenizer:
     def apply_chat_template(self, messages, *, tokenize, add_generation_prompt):
         assert not tokenize and add_generation_prompt
         assert messages[0]["role"] == "system"
-        assert messages[1]["role"] == "user"
-        return f"system:{messages[0]['content']}\nuser:{messages[1]['content']}\nassistant:"
+        return "\n".join(
+            f"{message['role']}:{message['content']}<|im_end|>" for message in messages
+        ) + "\nassistant:"
 
     def __call__(self, text, **kwargs):
         ids = [ord(char) for char in text]
@@ -41,7 +42,7 @@ class FakeLlm:
 
     def generate(self, prompts, sampling_params, *, use_tqdm):
         text = next(self._texts)
-        token_ids = [1000 + index for index in range(len(text))]
+        token_ids = [ord(char) for char in text]
         logprobs = [{token_id: SimpleNamespace(logprob=-0.1)} for token_id in token_ids]
         output = SimpleNamespace(text=text, token_ids=token_ids, logprobs=logprobs)
         return [SimpleNamespace(outputs=[output])]
@@ -113,8 +114,8 @@ class GRPORolloutContractTest(unittest.TestCase):
             metadata_by_prompt={"question": PromptMetadata(("answer",), True)},
             llm=FakeLlm(
                 [
-                    "<think>search</think><search>annual report</search>",
-                    "<think>answer</think><answer>answer</answer>",
+                    "<think>search</think><search>annual report</search><|im_end|>",
+                    "<think>answer</think><answer>answer</answer><|im_end|>",
                 ]
             ),
             sampling_params_factory=lambda **kwargs: kwargs,
@@ -128,6 +129,26 @@ class GRPORolloutContractTest(unittest.TestCase):
         self.assertIn(0, output["env_mask"][0])
         self.assertTrue(any(value == 0.0 for value in output["logprobs"][0]))
         self.assertEqual(output["trajectories"][0].final_answer, "answer")
+
+    def test_strips_qwen_chat_end_token_before_parsing_search(self) -> None:
+        rollout = VllmReActGRPORollout(
+            model_path="unused",
+            tokenizer=CharacterTokenizer(),
+            retrieval_client=FakeRetriever(),
+            metadata_by_prompt={"question": PromptMetadata(("answer",), True)},
+            llm=FakeLlm(
+                [
+                    "<think>search</think><search>annual report</search><|im_end|>",
+                    "<think>answer</think><answer>answer</answer><|im_end|>",
+                ]
+            ),
+            sampling_params_factory=lambda **kwargs: kwargs,
+        )
+
+        output = rollout(["question"], FakeTrainer())
+
+        self.assertEqual(output["trajectories"][0].final_answer, "answer")
+        self.assertNotIn("<|im_end|>", output["trajectories"][0].raw_text)
 
     def test_transformers_backend_returns_aligned_sampling_contract(self) -> None:
         rollout = TransformersReActGRPORollout(

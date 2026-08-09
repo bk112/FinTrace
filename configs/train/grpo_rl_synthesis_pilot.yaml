@@ -1,0 +1,46 @@
+# 10-step reward-health pilot：验证连续 GRPO 更新后，多轮 ReAct 轨迹仍保持有效差异。
+run:
+  name: qwen25_3b_fintrace_rl_synthesis_pilot
+  project: fintrace
+
+model:
+  base_model_path: /media/xdhpc/data/whr/models/Qwen2.5-3B-Instruct
+  torch_dtype: bfloat16
+  max_model_length: 8192
+  lora_rank: 64
+  lora_alpha: 128
+  lora_dropout: 0.0
+
+rollout:
+  # 直接使用 trainer.model，因此每个优化步都能生成当前 LoRA 权重的轨迹。
+  engine: transformers
+  num_generations: 4
+  # 允许最多 8 轮检索及 observation；总长度需高于多轮环境上下文。
+  max_response_tokens: 8192
+  max_tokens_per_turn: 256
+  temperature: 1.0
+  top_p: 1.0
+  max_rounds: 8
+  max_tool_calls_per_round: 1
+  stop_sequences:
+    - "</search>"
+    - "</answer>"
+    - "<|im_end|>"
+
+retrieval:
+  adapter: kb
+  top_k: 3
+  timeout_seconds: 30
+
+training:
+  algorithm: grpo
+  learning_rate: 1.0e-6
+  kl_coefficient: 0.001
+  # 每个 prompt 的四条采样构成一个 GRPO 组，batch 必须能被 num_generations 整除。
+  per_device_train_batch_size: 4
+  gradient_accumulation_steps: 1
+  max_steps: 10
+  epsilon: 0.2
+
+data:
+  train_path: data/processed/rl_synthesis_target_verified.jsonl

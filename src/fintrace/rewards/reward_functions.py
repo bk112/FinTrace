@@ -358,8 +358,11 @@ def reward_retrieval_correctness(trajectory: Trajectory) -> float:
 def should_terminate_with_zero_reward(trajectory: Trajectory) -> bool:
     """
     检查是否触发"生成阶段终止惩罚"条件，触发则整条轨迹直接0分。
-    对应WXG文档中的四个终止条件：超过最大轮数、标签解析错误、单轮工具调用过多、重复query。
+    对应的终止条件包括：未产出最终答案、超过最大轮数、标签解析错误、单轮工具调用过多、重复query。
     """
+    # 过程奖励只能引导检索，不能替代任务完成；没有 answer 的轨迹不可用于优化答案策略。
+    if trajectory.final_answer is None:
+        return True
     if trajectory.num_rounds > MAX_ROUNDS:
         return True
     if trajectory.tool_calls_in_single_round > MAX_TOOL_CALLS_PER_ROUND:

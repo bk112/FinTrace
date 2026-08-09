@@ -15,8 +15,8 @@ from fintrace.data.jsonl import iter_financial_qa_samples
 from fintrace.training import (
     PromptMetadata,
     TransformersReActGRPORollout,
+    TrajectoryAuditReward,
     VllmReActGRPORollout,
-    financial_trajectory_reward,
 )
 from fintrace.tools import ToolAwareHttpClient
 
@@ -73,14 +73,31 @@ def main() -> int:
     parser.add_argument("--config", type=Path, default=Path("configs/train/grpo_lora.example.yaml"))
     parser.add_argument("--endpoint", default=os.getenv("FINTRACE_TOOL_AWARE_ENDPOINT"))
     parser.add_argument("--output-dir", type=Path, default=Path("artifacts/checkpoints/grpo_first_pass"))
-    parser.add_argument("--max-steps", type=int, default=1)
-    parser.add_argument("--run", action="store_true", help="perform the one-step optimizer update")
+    parser.add_argument(
+        "--trace-output",
+        type=Path,
+        help="append each sampled ReAct trajectory and reward breakdown to this new JSONL file",
+    )
+    parser.add_argument(
+        "--append-trace",
+        action="store_true",
+        help="allow appending to an existing --trace-output JSONL instead of rejecting it",
+    )
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        help="override training.max_steps from the YAML configuration",
+    )
+    parser.add_argument("--run", action="store_true", help="perform optimizer updates")
     args = parser.parse_args()
 
-    if args.max_steps != 1:
+    if args.trace_output is not None and not args.run:
+        print("--trace-output requires --run", file=sys.stderr)
+        return 2
+    if args.trace_output is not None and args.trace_output.exists() and not args.append_trace:
         print(
-            "First-pass script only permits --max-steps 1: vLLM LoRA weight synchronization "
-            "between optimizer steps is not implemented yet.",
+            f"refusing to append to existing audit file: {args.trace_output} "
+            "(choose a new path or pass --append-trace)",
             file=sys.stderr,
         )
         return 2
@@ -89,6 +106,34 @@ def main() -> int:
     model_config = config["model"]
     rollout_config = config["rollout"]
     training_config = config["training"]
+    max_steps = args.max_steps if args.max_steps is not None else training_config.get("max_steps", 1)
+    if max_steps < 1:
+        print("max_steps must be at least 1", file=sys.stderr)
+        return 2
+    rollout_engine = rollout_config.get("engine", "vllm")
+    # vLLM EngineCore 不会自动接收每步更新后的 LoRA 权重，禁止产生误导性的多步训练。
+    if rollout_engine == "vllm" and max_steps != 1:
+        print(
+            "rollout.engine=vllm only permits max_steps=1 because LoRA weight synchronization "
+            "between optimizer steps is not implemented. Use rollout.engine=transformers for a multi-step pilot.",
+            file=sys.stderr,
+        )
+        return 2
+    world_size = int(os.getenv("WORLD_SIZE", "1"))
+    generation_batch_size = (
+        training_config["per_device_train_batch_size"]
+        * training_config.get("gradient_accumulation_steps", 1)
+        * world_size
+    )
+    if generation_batch_size % rollout_config["num_generations"] != 0:
+        print(
+            "generation batch size must be divisible by num_generations: "
+            f"{generation_batch_size} % {rollout_config['num_generations']} != 0. "
+            "Adjust training.per_device_train_batch_size, gradient_accumulation_steps, "
+            "or rollout.num_generations.",
+            file=sys.stderr,
+        )
+        return 2
     records, metadata_by_prompt = build_records(Path(config["data"]["train_path"]))
 
     retrieval_client = build_retrieval_client(config, args.endpoint)
@@ -98,10 +143,10 @@ def main() -> int:
         "records": len(records),
         "model": model_config["base_model_path"],
         "retrieval_adapter": config["retrieval"].get("adapter", "tool_aware"),
-        "rollout_engine": rollout_config.get("engine", "vllm"),
+        "rollout_engine": rollout_engine,
         "endpoint": args.endpoint,
         "num_generations": rollout_config["num_generations"],
-        "max_steps": args.max_steps,
+        "max_steps": max_steps,
     }
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     if not args.run:
@@ -120,7 +165,7 @@ def main() -> int:
         tokenizer.pad_token = tokenizer.eos_token
     model = AutoModelForCausalLM.from_pretrained(
         model_config["base_model_path"],
-        torch_dtype=torch.bfloat16,
+        dtype=torch.bfloat16,
     )
     # lora微调参数
     lora_config = LoraConfig(
@@ -139,7 +184,6 @@ def main() -> int:
         "temperature": rollout_config.get("temperature", 1.0),
         "top_p": rollout_config.get("top_p", 1.0),
     }
-    rollout_engine = rollout_config.get("engine", "vllm")
     if rollout_engine == "transformers":
         rollout = TransformersReActGRPORollout(**rollout_kwargs)
     elif rollout_engine == "vllm":
@@ -151,13 +195,39 @@ def main() -> int:
     else:
         raise ValueError("rollout.engine must be 'transformers' or 'vllm'")
 
+    # wandb 可视化：TRL 只消费已存在的 wandb.run（见 GRPOTrainer.log），故自行初始化。
+    report_to = "none"
+    try:
+        import wandb
+    except ImportError:
+        print("wandb not installed; metrics fall back to report_to=none", file=sys.stderr)
+        wandb = None  # type: ignore[assignment]
+
+    if wandb is not None:
+        run_section = config.get("run", {})
+        wandb.init(
+            project=run_section.get("project", "fintrace"),
+            name=run_section.get("name") or args.output_dir.name,
+            config={
+                "summary": summary,
+                "rollout": rollout_config,
+                "retrieval": config["retrieval"],
+                "training": training_config,
+            },
+        )
+        report_to = "wandb"
+
+    if args.trace_output is not None:
+        args.trace_output.parent.mkdir(parents=True, exist_ok=True)
+        print(json.dumps({"trajectory_audit": str(args.trace_output)}, ensure_ascii=False))
+
     # rl训练核心配置
     grpo_config = GRPOConfig(
         output_dir=str(args.output_dir),
         learning_rate=training_config["learning_rate"],
         per_device_train_batch_size=training_config["per_device_train_batch_size"],
         gradient_accumulation_steps=training_config["gradient_accumulation_steps"],
-        max_steps=args.max_steps,
+        max_steps=max_steps,
         num_generations=rollout_config["num_generations"],
         max_completion_length=rollout_config["max_response_tokens"],
         beta=training_config["kl_coefficient"],
@@ -165,21 +235,29 @@ def main() -> int:
         bf16=True,
         use_vllm=False,
         remove_unused_columns=False,
-        report_to="none",
+        report_to=report_to,
         save_strategy="steps",
-        save_steps=1,
+        save_steps=training_config.get("save_steps", 1),
+        save_total_limit=training_config.get("save_total_limit"),
+        logging_strategy="steps",
+        logging_steps=training_config.get("logging_steps", 1),
     )
+
     trainer = GRPOTrainer(
         model=model,
-        reward_funcs=financial_trajectory_reward,
+        reward_funcs=TrajectoryAuditReward(args.trace_output),
         args=grpo_config,
         train_dataset=Dataset.from_list(records),
         processing_class=tokenizer,
         peft_config=lora_config,
         rollout_func=rollout,
     )
-    trainer.train()
-    trainer.save_model(str(args.output_dir))
+    try:
+        trainer.train()
+        trainer.save_model(str(args.output_dir))
+    finally:
+        if report_to == "wandb":
+            wandb.finish()
     return 0
 
 

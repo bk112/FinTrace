@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import pytest
+
 from fintrace.data.agentic_synthesis import (
     answer_targets,
+    build_anchored_lookup_question,
     build_entity_groups,
     output_record,
     parse_candidate_choice,
@@ -56,5 +59,30 @@ def test_output_is_grounded_in_final_record_and_has_audit_meta() -> None:
     assert output["source"] == "fintrace_kb"
     assert output["ground_truth"]["target"] == answer_targets(final)
     assert output["meta"]["hop_count"] == 2
+    assert output["meta"]["target_fact_id"] == "final"
     assert output["meta"]["involved_records"][1]["fact_id"] == "final"
     assert parse_financial_qa_sample(output).qid == "ft_00001"
+
+
+def test_anchored_template_hides_entity_and_never_invents_a_relation() -> None:
+    root = record("root", value_text="10%")
+    root["date"] = "2021-Q1"
+    target = record("target", value_text="15%")
+    target["date"] = "2022-Q1"
+
+    question = build_anchored_lookup_question(root, target)
+
+    assert "测试公司" not in question
+    assert "2021-Q1" in question
+    assert "10%" in question
+    assert "2022-Q1" in question
+    assert "15%" not in question
+
+
+def test_anchored_template_rejects_target_answer_leak() -> None:
+    root = record("root", value_text="10%")
+    target = record("target", value_text="10%")
+    target["date"] = "2024-Q1"
+
+    with pytest.raises(ValueError, match="leak"):
+        build_anchored_lookup_question(root, target)

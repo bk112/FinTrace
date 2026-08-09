@@ -61,6 +61,27 @@ def answer_targets(record: dict[str, Any]) -> list[str]:
     return targets
 
 
+def build_anchored_lookup_question(root: dict[str, Any], target: dict[str, Any]) -> str:
+    """Build a two-hop lookup question without allowing an LLM to invent relations."""
+    required_fields = ("entity", "metric", "date", "value_text")
+    if any(not str(root.get(field, "")).strip() for field in required_fields):
+        raise ValueError("root record is missing a required template field")
+    if any(not str(target.get(field, "")).strip() for field in required_fields):
+        raise ValueError("target record is missing a required template field")
+    if root["entity"] != target["entity"] or root["metric"] != target["metric"]:
+        raise ValueError("anchored lookup requires the same entity and metric")
+    if root["date"] == target["date"]:
+        raise ValueError("anchored lookup requires different reporting dates")
+    if str(root["value_text"]).strip() == str(target["value_text"]).strip():
+        raise ValueError("root value would leak the target answer")
+
+    # 实体名只由根事实的“期间+指标+数值”线索隐式定位，目标答案始终是末条 record 原值。
+    return (
+        f"某家上市公司在{root['date']}披露的{root['metric']}为{root['value_text']}；"
+        f"请问该公司在{target['date']}的{target['metric']}具体是多少？"
+    )
+
+
 def render_candidates(candidates: list[dict[str, Any]]) -> str:
     """Give the remote LLM only numbered, provenance-preserving choices."""
     return "\n".join(
@@ -88,6 +109,8 @@ def output_record(
             "root_entity": root["entity"],
             "hop_count": len(involved),
             "actions": actions,
+            "target_fact_id": final_record["fact_id"],
+            "target_policy": "final_record_value",
             "involved_records": [
                 {
                     "fact_id": record["fact_id"],

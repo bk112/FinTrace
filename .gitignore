@@ -13,21 +13,10 @@ venv/
 .env.*
 !/.env.example
 
-# Data is managed outside version control. Keep only documentation here.
-# data/raw/*
-# !data/raw/.gitignore
-# data/interim/*
-# !data/interim/.gitignore
-# data/processed/*
-# !data/processed/.gitignore
-# data/evaluation/*
-# !data/evaluation/.gitignore
-
-# Rebuildable KB artifacts and third-party source datasets stay outside Git.
-# FAISS index files are rebuildable from the tracked jsonl data and exceed
-# GitHub's 100 MB per-file limit, so keep them out of version control.
-data/kb/*.index
-# data/FinanceComplexQA/
+# ---- Data policy ----
+# 数据全部入库保留。唯一例外：超过 GitHub 100 MB 单文件限制的大文件
+# (data/kb/*.index) 走 Git LFS，规则见 .gitattributes，不入普通对象库。
+# data/FinanceComplexQA 是子模块，由父仓库跟踪其 commit 指针。
 
 # Reproducible run outputs, models, and experiment logs
 artifacts/checkpoints/*

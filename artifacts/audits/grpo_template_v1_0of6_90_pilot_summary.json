@@ -1,0 +1,13 @@
+{
+  "trajectories": 40,
+  "prompt_groups": 10,
+  "answer_rate": 0.8,
+  "search_to_answer_rate": 0.8,
+  "search_rate": 1.0,
+  "repeated_query_rate": 0.075,
+  "terminated_zero_rate": 0.2,
+  "reward_mean": 0.21836956521739131,
+  "reward_std": 0.22675015084310843,
+  "zero_reward_std_group_rate": 0.1,
+  "avg_rounds": 2.7
+}

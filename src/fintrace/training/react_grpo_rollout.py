@@ -128,7 +128,7 @@ class VllmReActGRPORollout:
             base_prompt_ids = self._encode(rendered_prompt)
             # TRL 的 RepeatSampler 已将同一 prompt 复制 num_generations 次。
             # 此处每个输入只生成一次，不能再次展开，否则各字段 batch 维度不一致。
-            sample = self._run_one(base_prompt_ids, metadata)
+            sample = self._run_one(prompt, base_prompt_ids, metadata)
             prompt_ids.append(base_prompt_ids)
             completion_ids.append(sample[0])
             logprobs.append(sample[1])
@@ -147,6 +147,7 @@ class VllmReActGRPORollout:
 
     def _run_one(
         self,
+        prompt: str,
         base_prompt_ids: list[int],
         metadata: PromptMetadata,
     ) -> tuple[list[int], list[float], list[int], Trajectory]:
@@ -160,15 +161,17 @@ class VllmReActGRPORollout:
         repeated_query = False
 
         for round_number in range(1, self._max_rounds + 1):
-            chunk = self._generate_chunk(context_ids)
+            chunk = self._strip_trailing_chat_end(self._generate_chunk(context_ids))
             context_ids.extend(chunk.token_ids)
             completion_ids.extend(chunk.token_ids)
             completion_logprobs.extend(chunk.logprobs)
             env_mask.extend([1] * len(chunk.token_ids))
-            assistant_text += chunk.text
+            # Qwen 将 assistant 回合以 <|im_end|> 收尾；它是 chat 边界而非 ReAct 内容。
+            turn_text = chunk.text
+            assistant_text += turn_text
 
             try:
-                action = parse_react_turn(chunk.text)
+                action = parse_react_turn(turn_text)
             except ReActParseError:
                 return self._finished(
                     assistant_text, metadata, search_steps, round_number, repeated_query,
@@ -199,7 +202,9 @@ class VllmReActGRPORollout:
                 )
 
             observation = f"<observation>{retrieved.text}</observation>"
-            observation_ids = self._encode(observation)
+            # 不重新编码整个对话：BPE 在已采样文本与模板边界处可能重新分词，造成
+            # token 前缀漂移。Qwen chat template 的桥接文本是稳定的，直接追加即可。
+            observation_ids = self._encode(self._qwen_observation_bridge(observation))
             context_ids.extend(observation_ids)
             completion_ids.extend(observation_ids)
             # observation 不是策略模型采样出的 token：logprob 填零，并通过 env_mask 完全屏蔽 loss。
@@ -255,6 +260,35 @@ class VllmReActGRPORollout:
 
     def _encode(self, text: str) -> list[int]:
         return list(self._tokenizer(text, add_special_tokens=False)["input_ids"])
+
+    def _strip_trailing_chat_end(self, chunk: SampledChunk) -> SampledChunk:
+        """Move a sampled Qwen turn delimiter back under chat-template ownership."""
+        chat_end = "<|im_end|>"
+        chat_end_index = chunk.text.rfind(chat_end)
+        trailing_whitespace = chunk.text[chat_end_index + len(chat_end) :]
+        if chat_end_index < 0 or (trailing_whitespace and not trailing_whitespace.isspace()):
+            return chunk
+        trailing_text = chunk.text[chat_end_index:]
+        chat_end_ids = self._tokenizer(trailing_text, add_special_tokens=False)["input_ids"]
+        if not chat_end_ids or chunk.token_ids[-len(chat_end_ids) :] != chat_end_ids:
+            raise RuntimeError("chat-end text and token IDs disagree")
+        # 模板在追加 observation 时会补回 <|im_end|>；它不是应优化的 Agent 内容。
+        return SampledChunk(
+            text=chunk.text[:chat_end_index],
+            token_ids=chunk.token_ids[: -len(chat_end_ids)],
+            logprobs=chunk.logprobs[: -len(chat_end_ids)],
+        )
+
+    def _qwen_observation_bridge(self, observation: str) -> str:
+        """Return the chat-template suffix after an assistant tool call."""
+        rendered_prompt = self._render_prompt("template probe")
+        if "<|im_start|>assistant\n" in rendered_prompt:
+            return (
+                "<|im_end|>\n<|im_start|>user\n"
+                f"{observation}<|im_end|>\n<|im_start|>assistant\n"
+            )
+        # 仅用于非 Qwen 的轻量测试 tokenizer；正式训练模型固定为 Qwen2.5。
+        return f"<|im_end|>\nuser:{observation}<|im_end|>\nassistant:"
 
     @staticmethod
     def _finished(
