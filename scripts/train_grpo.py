@@ -12,7 +12,12 @@ from pathlib import Path
 import yaml
 
 from fintrace.data.jsonl import iter_financial_qa_samples
-from fintrace.training import PromptMetadata, VllmReActGRPORollout, financial_trajectory_reward
+from fintrace.training import (
+    PromptMetadata,
+    TransformersReActGRPORollout,
+    VllmReActGRPORollout,
+    financial_trajectory_reward,
+)
 from fintrace.tools import ToolAwareHttpClient
 
 
@@ -93,6 +98,7 @@ def main() -> int:
         "records": len(records),
         "model": model_config["base_model_path"],
         "retrieval_adapter": config["retrieval"].get("adapter", "tool_aware"),
+        "rollout_engine": rollout_config.get("engine", "vllm"),
         "endpoint": args.endpoint,
         "num_generations": rollout_config["num_generations"],
         "max_steps": args.max_steps,
@@ -124,17 +130,26 @@ def main() -> int:
         lora_dropout=model_config["lora_dropout"],
         target_modules="all-linear",
     )
-    rollout = VllmReActGRPORollout(
-        model_path=model_config["base_model_path"],
-        tokenizer=tokenizer,
-        retrieval_client=retrieval_client,
-        metadata_by_prompt=metadata_by_prompt,
-        max_rounds=rollout_config["max_rounds"],
-        max_tokens_per_turn=rollout_config.get("max_tokens_per_turn", 1024),
-        temperature=rollout_config.get("temperature", 1.0),
-        top_p=rollout_config.get("top_p", 1.0),
-        dtype=model_config["torch_dtype"],
-    )
+    rollout_kwargs = {
+        "tokenizer": tokenizer,
+        "retrieval_client": retrieval_client,
+        "metadata_by_prompt": metadata_by_prompt,
+        "max_rounds": rollout_config["max_rounds"],
+        "max_tokens_per_turn": rollout_config.get("max_tokens_per_turn", 1024),
+        "temperature": rollout_config.get("temperature", 1.0),
+        "top_p": rollout_config.get("top_p", 1.0),
+    }
+    rollout_engine = rollout_config.get("engine", "vllm")
+    if rollout_engine == "transformers":
+        rollout = TransformersReActGRPORollout(**rollout_kwargs)
+    elif rollout_engine == "vllm":
+        rollout = VllmReActGRPORollout(
+            model_path=model_config["base_model_path"],
+            dtype=model_config["torch_dtype"],
+            **rollout_kwargs,
+        )
+    else:
+        raise ValueError("rollout.engine must be 'transformers' or 'vllm'")
 
     # rl训练核心配置
     grpo_config = GRPOConfig(

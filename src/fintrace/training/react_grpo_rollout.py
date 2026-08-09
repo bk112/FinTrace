@@ -83,7 +83,6 @@ class VllmReActGRPORollout:
         self._top_p = top_p
 
     def __call__(self, prompts: list[str], trainer: Any) -> dict[str, Any]:
-        num_generations = trainer.num_generations
         prompt_ids: list[list[int]] = []
         completion_ids: list[list[int]] = []
         logprobs: list[list[float]] = []
@@ -97,14 +96,15 @@ class VllmReActGRPORollout:
                 raise KeyError("rollout prompt is missing dataset metadata")
             rendered_prompt = self._render_prompt(prompt)
             base_prompt_ids = self._encode(rendered_prompt)
-            for _ in range(num_generations):
-                sample = self._run_one(base_prompt_ids, metadata)
-                prompt_ids.append(base_prompt_ids)
-                completion_ids.append(sample[0])
-                logprobs.append(sample[1])
-                env_mask.append(sample[2])
-                trajectories.append(sample[3])
-                targets.append(metadata.targets)
+            # TRL 的 RepeatSampler 已将同一 prompt 复制 num_generations 次。
+            # 此处每个输入只生成一次，不能再次展开，否则各字段 batch 维度不一致。
+            sample = self._run_one(base_prompt_ids, metadata)
+            prompt_ids.append(base_prompt_ids)
+            completion_ids.append(sample[0])
+            logprobs.append(sample[1])
+            env_mask.append(sample[2])
+            trajectories.append(sample[3])
+            targets.append(metadata.targets)
 
         return {
             "prompt_ids": prompt_ids,
@@ -252,3 +252,102 @@ class VllmReActGRPORollout:
             valid_inst=metadata.valid_inst,
         )
         return completion_ids, completion_logprobs, env_mask, trajectory
+
+
+class TransformersReActGRPORollout(VllmReActGRPORollout):
+    """Use the trainer's Transformers model when vLLM EngineCore is unavailable."""
+
+    def __init__(
+        self,
+        *,
+        tokenizer: Any,
+        retrieval_client: RetrievalClient,
+        metadata_by_prompt: Mapping[str, PromptMetadata],
+        max_rounds: int = MAX_ROUNDS,
+        max_tokens_per_turn: int = 1024,
+        temperature: float = 1.0,
+        top_p: float = 1.0,
+    ) -> None:
+        # 复用多轮检索编排；该后端覆写 _generate_chunk，不会使用占位 vLLM 对象。
+        super().__init__(
+            model_path="unused-transformers-backend",
+            tokenizer=tokenizer,
+            retrieval_client=retrieval_client,
+            metadata_by_prompt=metadata_by_prompt,
+            max_rounds=max_rounds,
+            max_tokens_per_turn=max_tokens_per_turn,
+            temperature=temperature,
+            top_p=top_p,
+            llm=object(),
+            sampling_params_factory=object(),
+        )
+        self._trainer_model: Any | None = None
+        self._device: Any | None = None
+
+    def __call__(self, prompts: list[str], trainer: Any) -> dict[str, Any]:
+        import torch
+
+        model = trainer.model
+        was_training = model.training
+        self._trainer_model = model
+        self._device = next(model.parameters()).device
+        model.eval()
+        try:
+            with torch.inference_mode():
+                return super().__call__(prompts, trainer)
+        finally:
+            if was_training:
+                model.train()
+            self._trainer_model = None
+            self._device = None
+
+    def _generate_chunk(self, context_ids: list[int]) -> SampledChunk:
+        import torch
+        from transformers import StoppingCriteria, StoppingCriteriaList
+
+        if self._trainer_model is None or self._device is None:
+            raise RuntimeError("Transformers rollout requires an active trainer model")
+
+        tokenizer = self._tokenizer
+        stop_token_sequences = [
+            tokenizer(stop, add_special_tokens=False)["input_ids"]
+            for stop in ("</search>", "</answer>", "<|im_end|>")
+        ]
+
+        class StopOnTags(StoppingCriteria):
+            def __call__(self, input_ids, scores, **kwargs) -> bool:
+                tokens = input_ids[0].tolist()
+                return any(
+                    stop_tokens and tokens[-len(stop_tokens) :] == stop_tokens
+                    for stop_tokens in stop_token_sequences
+                )
+
+        input_ids = torch.tensor([context_ids], dtype=torch.long, device=self._device)
+        attention_mask = torch.ones_like(input_ids)
+        prompt_length = input_ids.shape[1]
+        pad_token_id = tokenizer.pad_token_id or tokenizer.eos_token_id
+        output_ids = self._trainer_model.generate(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            do_sample=True,
+            temperature=self._temperature,
+            top_p=self._top_p,
+            max_new_tokens=self._max_tokens_per_turn,
+            pad_token_id=pad_token_id,
+            stopping_criteria=StoppingCriteriaList([StopOnTags()]),
+        )
+        token_ids = output_ids[0, prompt_length:].tolist()
+        if not token_ids:
+            raise RuntimeError("Transformers rollout generated no tokens")
+
+        logits = self._trainer_model(input_ids=output_ids).logits[:, :-1, :]
+        generated_logits = logits[:, prompt_length - 1 : prompt_length - 1 + len(token_ids), :]
+        generated_tokens = output_ids[:, prompt_length : prompt_length + len(token_ids)]
+        logprobs = torch.log_softmax(generated_logits, dim=-1).gather(
+            -1, generated_tokens.unsqueeze(-1)
+        )
+        return SampledChunk(
+            text=tokenizer.decode(token_ids, skip_special_tokens=False),
+            token_ids=token_ids,
+            logprobs=logprobs.squeeze(0).squeeze(-1).float().tolist(),
+        )

@@ -1,0 +1,47 @@
+# 仅用于 RL 合成数据的训练前冒烟检查；不会自动执行权重更新。
+run:
+  name: qwen25_3b_fintrace_rl_synthesis_smoke
+  seed: 43
+  output_dir: artifacts/checkpoints/grpo_rl_synthesis_smoke
+
+model:
+  base_model_path: /media/xdhpc/data/whr/models/Qwen2.5-3B-Instruct
+  torch_dtype: bfloat16
+  max_model_length: 4096
+  lora_rank: 64
+  lora_alpha: 128
+  lora_dropout: 0.0
+
+rollout:
+  engine: transformers
+  # 仅验证端到端反传：最小两条 completion 组成一个 GRPO 组。
+  num_generations: 2
+  max_response_tokens: 64
+  max_tokens_per_turn: 64
+  temperature: 1.0
+  top_p: 1.0
+  max_rounds: 1
+  max_tool_calls_per_round: 1
+  stop_sequences:
+    - "</search>"
+    - "</answer>"
+    - "<|im_end|>"
+
+retrieval:
+  # 训练前校验使用已构建的本地 KB，避免依赖 HTTP Tool-aware 服务。
+  adapter: kb
+  top_k: 3
+  timeout_seconds: 30
+
+training:
+  algorithm: grpo
+  learning_rate: 1.0e-6
+  kl_coefficient: 0.001
+  # GRPO 每个 prompt 采样 2 条 completion，batch 必须能被 num_generations 整除。
+  per_device_train_batch_size: 2
+  gradient_accumulation_steps: 1
+  max_steps: 1
+  epsilon: 0.2
+
+data:
+  train_path: data/interim/rl_synthesis_100_accepted.jsonl
