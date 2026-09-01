@@ -8,18 +8,29 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from fintrace.rewards import RewardBreakdown, Trajectory, compute_total_reward
+from fintrace.rewards.constants import MAX_ROUNDS, MAX_TOOL_CALLS_PER_ROUND
 
 
 def best_reward_breakdown(
     trajectory: Trajectory,
     accepted_targets: Sequence[str],
+    *,
+    max_rounds: int = MAX_ROUNDS,
+    max_tool_calls_per_round: int = MAX_TOOL_CALLS_PER_ROUND,
 ) -> tuple[str, RewardBreakdown]:
     """Return the best scoring accepted target and its complete reward breakdown."""
     if not accepted_targets:
         raise ValueError("every trajectory needs at least one accepted target")
     return max(
         (
-            (target, compute_total_reward(replace(trajectory, ground_truth=target)))
+            (
+                target,
+                compute_total_reward(
+                    replace(trajectory, ground_truth=target),
+                    max_rounds=max_rounds,
+                    max_tool_calls_per_round=max_tool_calls_per_round,
+                ),
+            )
             for target in accepted_targets
         ),
         key=lambda candidate: candidate[1].total,
@@ -61,6 +72,8 @@ def financial_trajectory_reward(
     *,
     trajectories: Sequence[Trajectory],
     targets: Sequence[Sequence[str]],
+    max_rounds: int = MAX_ROUNDS,
+    max_tool_calls_per_round: int = MAX_TOOL_CALLS_PER_ROUND,
     **_: Any,
 ) -> list[float]:
     """Score every acceptable target and retain the best valid formulation."""
@@ -70,7 +83,12 @@ def financial_trajectory_reward(
     rewards: list[float] = []
     for trajectory, accepted_targets in zip(trajectories, targets, strict=True):
         # 数据集允许同一事实有多个规范表述；不能只拿第一个表述误伤正确回答。
-        _, breakdown = best_reward_breakdown(trajectory, accepted_targets)
+        _, breakdown = best_reward_breakdown(
+            trajectory,
+            accepted_targets,
+            max_rounds=max_rounds,
+            max_tool_calls_per_round=max_tool_calls_per_round,
+        )
         rewards.append(breakdown.total)
     return rewards
 
@@ -82,8 +100,17 @@ class TrajectoryAuditReward:
     persisting per-completion records.
     """
 
-    def __init__(self, output_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        output_path: Path | None = None,
+        *,
+        max_rounds: int = MAX_ROUNDS,
+        max_tool_calls_per_round: int = MAX_TOOL_CALLS_PER_ROUND,
+    ) -> None:
         self._output_path = output_path
+        # 终止阈值取自训练时实际生效的 rollout 配置，避免与 constants.py 的默认值脱节。
+        self._max_rounds = max_rounds
+        self._max_tool_calls_per_round = max_tool_calls_per_round
 
     def __call__(
         self,
@@ -100,7 +127,12 @@ class TrajectoryAuditReward:
         rows: list[dict[str, Any]] = []
         rewards: list[float] = []
         for index, (trajectory, accepted_targets) in enumerate(zip(trajectories, targets, strict=True)):
-            selected_target, breakdown = best_reward_breakdown(trajectory, accepted_targets)
+            selected_target, breakdown = best_reward_breakdown(
+                trajectory,
+                accepted_targets,
+                max_rounds=self._max_rounds,
+                max_tool_calls_per_round=self._max_tool_calls_per_round,
+            )
             rewards.append(breakdown.total)
             rows.append(
                 {

@@ -84,6 +84,35 @@ class TrainingRewardTest(unittest.TestCase):
         self.assertTrue(breakdown.terminated_with_zero)
         self.assertEqual(breakdown.total, 0.0)
 
+    def test_termination_threshold_honors_rollout_config(self) -> None:
+        """奖励的轮数判据必须使用 rollout 实际配置，而非 constants 默认值。"""
+        trajectory = Trajectory(
+            raw_text="<think>done</think><answer>15.3%</answer>",
+            ground_truth="15.3%",
+            final_answer="15.3%",
+            num_rounds=5,
+        )
+
+        # 默认阈值（25 轮）下该轨迹合法；rollout 配置 4 轮时必须归零。
+        self.assertGreater(compute_total_reward(trajectory).total, 0.0)
+        breakdown = compute_total_reward(trajectory, max_rounds=4)
+        self.assertTrue(breakdown.terminated_with_zero)
+        self.assertEqual(breakdown.total, 0.0)
+
+    def test_audit_reward_honors_configured_max_rounds(self) -> None:
+        trajectory = Trajectory(
+            raw_text="<think>done</think><answer>新能源</answer>",
+            ground_truth="新能源",
+            final_answer="新能源",
+            num_rounds=5,
+        )
+
+        reward = TrajectoryAuditReward(None, max_rounds=4)(
+            trajectories=[trajectory], targets=[("新能源",)]
+        )
+
+        self.assertEqual(reward, [0.0])
+
     def test_audit_reward_writes_trace_and_reward_breakdown(self) -> None:
         trajectory = Trajectory(
             raw_text="<think>done</think><answer>新能源</answer>",

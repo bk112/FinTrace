@@ -91,7 +91,7 @@ FinTrace 只训练金融多跳检索 Agent 的**执行层**。Planner 与线上 
 
 ### 奖励层
 
-`src/fintrace/rewards/reward_functions.py` 是给定的、已验证的**单 target** 模块。`compute_total_reward(Trajectory)` 返回 `RewardBreakdown`，包含五个分量：答案正确性（F1 + 数值近似匹配，权重 0.4）、答案 CEM（0.2）、格式合规（0.2）、搜索激励（0.1，最多计两次搜索）、检索正确（0.1），最后把总分 clamp 到 `[0, 1]`。`should_terminate_with_zero_reward` 是一票否决：没有最终答案、超过 `MAX_ROUNDS`、单轮工具调用过多、重复 query、标签不配对，都会让整条轨迹归零。当 `valid_inst` 为真且答案命中“无法回答”关键词表时，正确性维度返回负的 `INVALID_ANSWER_PENALTY`，经 clamp 后的实际效果是抵消其他正向分量，而不是让总分为负。所有权重与阈值集中在 `rewards/constants.py`，不要硬编码。
+`src/fintrace/rewards/reward_functions.py` 是给定的、已验证的**单 target** 模块。`compute_total_reward(Trajectory)` 返回 `RewardBreakdown`，包含五个分量：答案正确性（F1 + 数值近似匹配，权重 0.4）、答案 CEM（0.2）、格式合规（0.2）、搜索激励（0.1，最多计两次搜索）、检索正确（0.1），最后把总分 clamp 到 `[0, 1]`。`should_terminate_with_zero_reward` 是一票否决：没有最终答案、超过最大轮数、单轮工具调用过多、重复 query、标签不配对，都会让整条轨迹归零；其中轮数与单轮工具调用阈值以参数形式从 rollout 配置透传（`max_rounds` / `max_tool_calls_per_round`，默认取 `rewards/constants.py` 的 `MAX_ROUNDS` / `MAX_TOOL_CALLS_PER_ROUND`），`train_grpo.py` 会把 YAML 里的值喂给 `TrajectoryAuditReward`，保证判据与实际 rollout 一致。当 `valid_inst` 为真且答案命中“无法回答”关键词表时，正确性维度返回负的 `INVALID_ANSWER_PENALTY`，经 clamp 后的实际效果是抵消其他正向分量，而不是让总分为负。所有权重与阈值集中在 `rewards/constants.py`，不要硬编码。
 
 `src/fintrace/training/reward_adapter.py` 负责把单 target 模块桥接到多 target 数据。`best_reward_breakdown` 会对每个可接受的 target 表述重新打分并取最大值，因为同一事实存在多种规范表述。传给 `GRPOTrainer` 的可调用对象是 `TrajectoryAuditReward`：它可选地把每条采样的审计行（prompt、轨迹、每次检索的预览、完整分维度明细）追加写入 JSONL，并在存在 `wandb.run` 时记录聚合指标。
 
@@ -99,7 +99,7 @@ FinTrace 只训练金融多跳检索 Agent 的**执行层**。Planner 与线上 
 
 rollout 代码只依赖 `src/fintrace/tools/base.py` 中的 `RetrievalClient` 协议（`search(query) -> RetrievalResult(query, text, metadata)`）。具体实现由 `configs/*.yaml` 的 `retrieval.adapter` 选择：
 
-- `kb`（训练推荐，进程内）：`KbRetrievalClient` 包装 `src/fintrace/kb/service.py`，后者用加锁的懒加载读取 FAISS 索引与记录，并在服务前校验 manifest（embedding 模型名、记录数、向量维度、`records_sha256`）。`format_result` 会把清洗后的结构化记录以 `<!-- metadata: {...} -->` JSON 块内嵌进 observation 文本，`KbRetrievalClient` 同时以 `metadata["records"]` 返回同一份数据；检索正确性奖励读取该列表，并优先按规范化的 `value_text`/`unit` 判定，避免把“15.3亿元”误判为“15.3%”。
+- `kb`（训练推荐，进程内）：`KbRetrievalClient` 包装 `src/fintrace/kb/service.py`，后者用加锁的懒加载读取 FAISS 索引与记录，并在服务前校验 manifest（embedding 模型名、记录数、向量维度、`records_sha256`）。`format_result` 的 observation 正文刻意只渲染 `entity/metric/value_text/source_doc` 四个字段，**默认不**把完整结构化记录内嵌进模型可见文本（避免策略直接复抄 `fact`/`value_number`，也缩短多轮上下文）；同一份清洗记录经 `metadata["records"]` 走带外通道传给奖励函数，检索正确性奖励读取该列表，并优先按规范化的 `value_text`/`unit` 判定，避免把“15.3亿元”误判为“15.3%”。需要内联调试时给 `retrieve`/`KbRetrievalClient` 传 `include_metadata=True`。
 - `tool_aware`（HTTP）：`ToolAwareHttpClient` 只负责传输、超时与响应归一化，端点来自 `FINTRACE_TOOL_AWARE_ENDPOINT` 或 `--endpoint`。
 
 `src/fintrace/tools/local_tool_aware.py` 与 `local_web.py` 实现了一个免密钥的本地 Tool-aware 替代方案：DuckDuckGo HTML 搜索 → 按域名优先级（cninfo、sse、szse、hkexnews、sec）抓取正文，带 SSRF 防护（拒绝内网/回环/保留地址）、正文长度截断，以及基于 SHA-256 的查询缓存，保证多步 RL 复放同一份证据。

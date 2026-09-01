@@ -4,7 +4,14 @@ Lazy-loads FAISS index + records on first call; thread-safe after initialisation
 
 Two interfaces (per v1.1 §3):
   - search_records(query, top_k) → list[dict]   (structured records)
-  - retrieve(query)              → str with metadata.records (model-consumable text)
+  - retrieve(query)              → str (model-consumable text)
+
+Observation text is deliberately kept minimal: each hit renders only
+entity / metric / value_text / source_doc. The full v1.1 record (including
+``fact``, ``value_number``, ``fact_id`` and ``source_url``) travels out of band
+via ``RetrievalResult.metadata["records"]`` and is consumed by the reward
+function, never by the policy. Inlining it would hand the model a copyable
+rendering of the answer and bloat a multi-turn context.
 """
 
 from __future__ import annotations
@@ -130,11 +137,22 @@ def search_records(query: str, top_k: int = 3) -> list[dict]:
     return results
 
 
-def format_result(query: str, records: list[dict]) -> tuple[str, list[dict]]:
+def format_result(
+    query: str,
+    records: list[dict],
+    *,
+    include_metadata: bool = False,
+) -> tuple[str, list[dict]]:
     """Format search records into (model-consumable text, clean record list).
 
     Shared by ``retrieve()`` and :class:`KbRetrievalClient` so both produce
     byte-identical observation text and metadata records (one encode per query).
+
+    ``include_metadata`` appends the full v1.1 records as an HTML comment. It
+    defaults to ``False`` because the policy must not see rendered copies of
+    ``fact`` / ``value_number`` / ``fact_id``; the reward function reads the
+    same records from ``RetrievalResult.metadata["records"]`` instead. Enable it
+    only for debugging or ablation runs that need inline provenance.
     """
     if not records:
         return f"[search] 未找到与 \"{query}\" 相关的结果。", []
@@ -147,29 +165,29 @@ def format_result(query: str, records: list[dict]) -> tuple[str, list[dict]]:
         value = rec.get("value_text", "")
         lines.append(f"{i}. [{entity}] {metric}: {value} （来源: {source}）")
 
-    # Embed metadata for reward function
     records_clean = [{k: v for k, v in r.items() if k != "_score"} for r in records]
-    metadata_json = json.dumps({"records": records_clean}, ensure_ascii=False)
-    lines.append(f"\n<!-- metadata: {metadata_json} -->")
+    if include_metadata:
+        metadata_json = json.dumps({"records": records_clean}, ensure_ascii=False)
+        lines.append(f"\n<!-- metadata: {metadata_json} -->")
 
     return "\n".join(lines), records_clean
 
 
-def retrieve(query: str, top_k: int = 3) -> str:
+def retrieve(query: str, top_k: int = 3, *, include_metadata: bool = False) -> str:
     """Search and format results as model-consumable text.
-
-    Returns formatted text string with structured records embedded
-    as metadata.records in a JSON block that the reward function can parse.
 
     Args:
         query: Natural-language search query.
         top_k: Number of results to return.
+        include_metadata: Append the full v1.1 records as an HTML comment.
+            Off by default; see :func:`format_result`.
 
     Returns:
-        Markdown-formatted search results with embedded metadata JSON.
+        Formatted search results, with structured records available separately
+        (``search_records``) rather than inlined in the policy-visible text.
     """
     records = search_records(query, top_k)
-    text, _ = format_result(query, records)
+    text, _ = format_result(query, records, include_metadata=include_metadata)
     return text
 
 

@@ -16,9 +16,15 @@ from . import service as kb_service
 
 @dataclass(frozen=True)
 class KbRetrievalClient:
-    """RetrievalClient adapter backed by the local FAISS knowledge base."""
+    """RetrievalClient adapter backed by the local FAISS knowledge base.
+
+    ``include_metadata`` is off by default so the policy-visible observation
+    stays proofread-minimal; the reward function still receives every v1.1
+    field through ``metadata["records"]``.
+    """
 
     top_k: int = 3
+    include_metadata: bool = False
 
     def search(self, query: str) -> RetrievalResult:
         """Run one query against the local KB.
@@ -29,7 +35,9 @@ class KbRetrievalClient:
             (used by reward-function exact matching on value_text/value_number).
         """
         records = kb_service.search_records(query, self.top_k)
-        text, clean_records = kb_service.format_result(query, records)
+        text, clean_records = kb_service.format_result(
+            query, records, include_metadata=self.include_metadata
+        )
         return RetrievalResult(
             query=query,
             text=text,

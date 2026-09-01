@@ -2,7 +2,7 @@
 
 Covers:
   - search_records: basic query, empty query, top_k bounds
-  - retrieve: text formatting, metadata embedding
+  - retrieve: text formatting, opt-in metadata embedding
   - sample_seed_facts: random sampling, entity filter, edge cases
 """
 
@@ -75,8 +75,8 @@ class TestRetrieve:
         text = retrieve_fn("银行净利润", top_k=3)
         assert isinstance(text, str)
         assert "银行" in text or "搜索" in text
-        # Metadata block should be present
-        assert "<!-- metadata:" in text
+        # 默认观测只给 entity/metric/value_text/source_doc，不暴露可直接复制的结构化记录。
+        assert "<!-- metadata:" not in text
 
     def test_retrieve_empty_query(self, kb):
         _, retrieve_fn, _ = kb
@@ -85,7 +85,7 @@ class TestRetrieve:
 
     def test_metadata_is_valid_json(self, kb):
         _, retrieve_fn, _ = kb
-        text = retrieve_fn("保险营收", top_k=2)
+        text = retrieve_fn("保险营收", top_k=2, include_metadata=True)
         # Extract JSON between comments
         start = text.find("<!-- metadata: ")
         end = text.find(" -->", start)
@@ -103,7 +103,7 @@ class TestRetrieve:
 
     def test_metadata_records_have_v1_1_schema_fields(self, kb):
         _, retrieve_fn, _ = kb
-        text = retrieve_fn("宁德时代净利润", top_k=1)
+        text = retrieve_fn("宁德时代净利润", top_k=1, include_metadata=True)
         start = text.find("<!-- metadata: ")
         end = text.find(" -->", start)
         json_str = text[start + len("<!-- metadata: "):end]
@@ -168,8 +168,11 @@ class TestCrossInterface:
         results = search("格力电器毛利率", top_k=2)
         text = retrieve_fn("格力电器毛利率", top_k=2)
         for r in results:
-            # Each record's fact_id should appear in retrieve output
-            assert r["fact_id"] in text, f"fact_id {r['fact_id']} missing from retrieve output"
+            # 观测正文只暴露 entity/metric/value_text/source_doc；fact_id 走 metadata 通道。
+            assert r["entity"] in text, f"entity {r['entity']} missing from retrieve output"
+            assert str(r["value_text"]) in text, (
+                f"value_text {r['value_text']} missing from retrieve output"
+            )
 
 
 def test_kb_excludes_financecomplexqa_gold_answers():
@@ -201,6 +204,25 @@ class TestKbRetrievalClient:
         client = KbRetrievalClient(top_k=3)
         result = client.search("招商银行营收")
         assert result.text == retrieve("招商银行营收", top_k=3)
+
+    def test_client_omits_inline_metadata_by_default(self, kb):
+        """策略可见文本不得包含可复制的结构化记录（fact/value_number/fact_id）。"""
+        from fintrace.kb import KbRetrievalClient, retrieve
+
+        client = KbRetrievalClient(top_k=3)
+        result = client.search("招商银行营收")
+        assert "<!-- metadata:" not in result.text
+        # 奖励侧仍然拿到完整 v1.1 记录，检索正确性判定不受影响。
+        assert result.metadata["records"]
+        assert result.text == retrieve("招商银行营收", top_k=3)
+
+    def test_client_can_inline_metadata_for_debug(self, kb):
+        from fintrace.kb import KbRetrievalClient, retrieve
+
+        client = KbRetrievalClient(top_k=3, include_metadata=True)
+        result = client.search("招商银行营收")
+        assert "<!-- metadata:" in result.text
+        assert result.text == retrieve("招商银行营收", top_k=3, include_metadata=True)
 
     def test_records_match_search_records_output(self, kb):
         from fintrace.kb import KbRetrievalClient, search_records

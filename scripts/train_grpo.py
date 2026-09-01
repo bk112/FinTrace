@@ -12,6 +12,7 @@ from pathlib import Path
 import yaml
 
 from fintrace.data.jsonl import iter_financial_qa_samples
+from fintrace.rewards.constants import MAX_TOOL_CALLS_PER_ROUND
 from fintrace.training import (
     PromptMetadata,
     TransformersReActGRPORollout,
@@ -134,6 +135,20 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
+    max_rounds = rollout_config["max_rounds"]
+    max_tool_calls_per_round = rollout_config.get(
+        "max_tool_calls_per_round", MAX_TOOL_CALLS_PER_ROUND
+    )
+    if max_tool_calls_per_round != 1:
+        # ReAct parser 每轮只接受一个 action，rollout 侧无法产生更多工具调用。
+        # 这里只提示，不阻断：历史配置沿用了大于 1 的取值，语义上等价于 1。
+        print(
+            f"warning: rollout.max_tool_calls_per_round={max_tool_calls_per_round} is inert; "
+            "the ReAct parser accepts exactly one action per turn, so each round "
+            "issues at most one search.",
+            file=sys.stderr,
+        )
+
     records, metadata_by_prompt = build_records(Path(config["data"]["train_path"]))
 
     retrieval_client = build_retrieval_client(config, args.endpoint)
@@ -147,6 +162,9 @@ def main() -> int:
         "endpoint": args.endpoint,
         "num_generations": rollout_config["num_generations"],
         "max_steps": max_steps,
+        # 奖励的终止判据必须与 rollout 用同一组阈值，否则审计里的归零原因会失真。
+        "max_rounds": max_rounds,
+        "max_tool_calls_per_round": max_tool_calls_per_round,
     }
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     if not args.run:
@@ -179,7 +197,7 @@ def main() -> int:
         "tokenizer": tokenizer,
         "retrieval_client": retrieval_client,
         "metadata_by_prompt": metadata_by_prompt,
-        "max_rounds": rollout_config["max_rounds"],
+        "max_rounds": max_rounds,
         "max_tokens_per_turn": rollout_config.get("max_tokens_per_turn", 1024),
         "temperature": rollout_config.get("temperature", 1.0),
         "top_p": rollout_config.get("top_p", 1.0),
@@ -245,7 +263,11 @@ def main() -> int:
 
     trainer = GRPOTrainer(
         model=model,
-        reward_funcs=TrajectoryAuditReward(args.trace_output),
+        reward_funcs=TrajectoryAuditReward(
+            args.trace_output,
+            max_rounds=max_rounds,
+            max_tool_calls_per_round=max_tool_calls_per_round,
+        ),
         args=grpo_config,
         train_dataset=Dataset.from_list(records),
         processing_class=tokenizer,

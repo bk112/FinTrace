@@ -355,17 +355,26 @@ def reward_retrieval_correctness(trajectory: Trajectory) -> float:
 # 生成阶段终止惩罚：判断是否触发直接0分
 # =========================================================
 
-def should_terminate_with_zero_reward(trajectory: Trajectory) -> bool:
+def should_terminate_with_zero_reward(
+    trajectory: Trajectory,
+    *,
+    max_rounds: int = MAX_ROUNDS,
+    max_tool_calls_per_round: int = MAX_TOOL_CALLS_PER_ROUND,
+) -> bool:
     """
     检查是否触发"生成阶段终止惩罚"条件，触发则整条轨迹直接0分。
     对应的终止条件包括：未产出最终答案、超过最大轮数、标签解析错误、单轮工具调用过多、重复query。
+
+    max_rounds / max_tool_calls_per_round 必须由 rollout 侧传入实际生效的配置值。
+    若沿用 constants.py 的默认值而 rollout 用了更严格的 max_rounds，本判据将永远不会触发，
+    超轮轨迹只能靠"没有 final_answer"间接归零——语义上等价，但无法在审计里区分终止原因。
     """
     # 过程奖励只能引导检索，不能替代任务完成；没有 answer 的轨迹不可用于优化答案策略。
     if trajectory.final_answer is None:
         return True
-    if trajectory.num_rounds > MAX_ROUNDS:
+    if trajectory.num_rounds > max_rounds:
         return True
-    if trajectory.tool_calls_in_single_round > MAX_TOOL_CALLS_PER_ROUND:
+    if trajectory.tool_calls_in_single_round > max_tool_calls_per_round:
         return True
     if trajectory.is_repeated_query:
         return True
@@ -390,11 +399,22 @@ class RewardBreakdown:
     terminated_with_zero: bool
 
 
-def compute_total_reward(trajectory: Trajectory) -> RewardBreakdown:
+def compute_total_reward(
+    trajectory: Trajectory,
+    *,
+    max_rounds: int = MAX_ROUNDS,
+    max_tool_calls_per_round: int = MAX_TOOL_CALLS_PER_ROUND,
+) -> RewardBreakdown:
     """
     计算一条轨迹的最终总Reward，返回分维度明细（便于训练时打日志排查问题）。
+
+    终止阈值与 rollout 的实际配置保持一致，由调用方透传。
     """
-    if should_terminate_with_zero_reward(trajectory):
+    if should_terminate_with_zero_reward(
+        trajectory,
+        max_rounds=max_rounds,
+        max_tool_calls_per_round=max_tool_calls_per_round,
+    ):
         return RewardBreakdown(
             answer_correctness=0.0,
             answer_cem=0.0,
