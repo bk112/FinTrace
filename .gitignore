@@ -31,7 +31,3 @@ wandb/
 .DS_Store
 .idea/
 .vscode/
-
-# Leftover of a nested repository (docs/参考内容/Search-R1/.git was renamed,
-# keeping the working tree only). Safe to delete locally at any time.
-**/.git_disabled/
